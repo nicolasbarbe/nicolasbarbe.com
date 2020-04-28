@@ -25,7 +25,7 @@ twitter_username: nicolasbarbe
 github_username:  nicolasbarbe
 
 # Build settings
-theme: minimal
+theme: jekyll-theme-minimal
 plugins:
   - jekyll-feed
 
