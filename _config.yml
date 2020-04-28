@@ -2,4 +2,5 @@
 title: @nicolasbarbe
 description: Thoughts, code, stuff and fun!
 twitter_username: @nicolasbarbe
+markdown: kramdown
 theme: jekyll-theme-minimal
