@@ -1,0 +1,145 @@
+---
+layout: post
+title: "Magnolia DevOps Series - Orchestration with Docker Compose"
+date: 2015-01-07 00:00:00 -0000
+---
+**Edit**: *In February 2015, Docker Inc [released Docker Compose](https://blog.docker.com/2014/12/announcing-docker-machine-swarm-and-compose-for-orchestrating-distributed-apps/) that will replace Fig in the future. This post has been updated accordingly.* 
+
+We have seen in the [last post](http://nicolasbarbe.com/2015/01/02/a-docker-image-for-magnolia/) how to use the [magnolia base image](https://registry.hub.docker.com/u/nicolasbarbe/magnolia-base) to deploy an existing WAR file. Even though this approach looks handy, it is not enough to build-up a production grade environment with Magnolia. 
+
+Several aspects have not been discussed - such as using an external service for the database or like the communication between two different Magnolia instances.
+
+In this post, I explain how to setup one Magnolia author instance and its public instance. 
+
+The author instance is used by editors to create and edit content. Once an article is ready, it is activated to the public instance, which is the only one accessible on Internet. 
+
+### How many containers? 
+
+A best practice is to use one container per process and to decouple each container as much as possible : A Magnolia instance runs inside its own container, and uses a dedicated database. As a consequence, we need 4 containers (in green) :
+
+{<1>}![One author and one public with their containers](/content/images/2015/01/Screen-Shot-2015-01-07-at-16-54-29-1.png)
+
+
+### How to use my own WAR?
+If you don't have any Maven project available, create a new one using the [Maven archetype](https://wiki.magnolia-cms.com/display/WIKI/Module+QuickStart) from an empty folder:
+
+```prettyprint lang-bash
+mvn archetype:generate -DarchetypeCatalog=https://nexus.magnolia-cms.com/content/groups/public/
+```
+You can find more details and a great tutorial in the [official documentation](http://documentation.magnolia-cms.com/display/DOCS/Creating+a+custom+bundle).
+
+After successfully building the project, Maven creates a `target` folder inside the webapp module with the WAR file. The next step is to send this WAR file to the docker container. 
+
+Create a new `Dockerfile` inside the root directory of your project with the following content:
+```prettyprint lang-bash
+FROM nicolasbarbe/magnolia-base
+COPY my-project-webapp/target/my-project-webapp*.war $CATALINA_BASE/webapps/ROOT.war
+```
+The benefit of this approach is to tie the deployment directive and the code in a version control such as GIT and to share this information easily accross the project. All Developers but also operators use the same deployment procedure and infrastructure. 
+
+
+### How to distinguish each Magnolia instance?
+With this approach, the WAR file is deployed in the ROOT context of Tomcat. As a consequence the default `magnolia.properties` is always picked-up. 
+
+In order to keep [one single WAR file with multiple configurations](http://documentation.magnolia-cms.com/display/DOCS/WAR+file+with+multiple+configurations#WARfilewithmultipleconfigurations-CreatingasingleWARfilewithmultipleconfigurations), I chose a similar approach than the one described by Greg in his [excellent post](http://dev.magnolia-cms.com/~gjoseph/dont-deploy-magnolia-deploy-your-project). However, instead of using a Tomcat context parameter to configure the type of the instance, I inject an environment variable called `INSTANCE_TYPE`.
+
+You must modify your `web.xml` to pick-up the right `magnolia.properties`  depending on the value of this environment variable: 
+
+```prettyprint lang-xml
+  <context-param>
+    <param-name>magnolia.initialization.file</param-name>
+    <param-value>
+      WEB-INF/config/${env/INSTANCE_TYPE}/magnolia.properties,
+      WEB-INF/config/default/magnolia.properties,
+      WEB-INF/config/magnolia.properties
+    </param-value>
+  </context-param>
+```
+
+In a similar manner, I will define another variable called `DB_TYPE` to define the type of the database.
+
+### Compose Up !
+Now comes the most interesting part - How to configure and orchestrate my containers?
+
+We have 4 containers, we could start them from the command line directly or we can use [Docker Compose](https://docs.docker.com/compose/).
+
+Docker Compose allows you to define your services and their relationships. The easiest way to understand how it works is to use it!
+
+Create a file called `docker-compose.yml` in the root directory of your project:
+
+```prettyprint lang-yml
+dbAuthor:
+  image: postgres
+  environment:
+    - POSTGRES_USER=magnolia
+    - POSTGRES_PASSWORD=mysecretpassword
+
+dbPublic:
+  image: mysql
+  environment:
+    - MYSQL_USER=magnolia
+    - MYSQL_PASSWORD=mysecretpassword
+    - MYSQL_DATABASE=magnolia
+    - MYSQL_ROOT_PASSWORD=myVerySecretPassword
+
+author:
+  image: nicolasbarbe/magnolia-cloud-bundle:0.2-SNAPSHOT
+  command: run
+  ports:
+    - "3000:8080"
+  links:
+    - dbAuthor:db
+  environment:
+    - INSTANCE_TYPE=author
+    - DB_TYPE=postgresql
+    - DB_ADDRESS=db
+    - DB_PORT=5432
+    - DB_SCHEMA=magnolia
+    - DB_USERNAME=magnolia
+    - DB_PASSWORD=mysecretpassword
+
+public:
+  image: nicolasbarbe/magnolia-cloud-bundle:0.2-SNAPSHOT
+  command: run
+  ports:
+    - "3001:8080"
+  links:
+    - dbPublic:db
+  environment:
+    - INSTANCE_TYPE=public
+    - DB_TYPE=mysql
+    - DB_ADDRESS=db
+    - DB_PORT=3306
+    - DB_SCHEMA=magnolia
+    - DB_USERNAME=magnolia
+    - DB_PASSWORD=mysecretpassword
+```
+
+And execute this command:
+
+```prettyprint lang-bash
+docker-compose up
+```
+
+Docker creates automatically 4 containers:
+
+- _dbAuthor_: A Postgres database based on the official image.
+- _dbPublic_: A MySQL database based on the official image.
+- _author_: The Magnolia author instance listening on the port 3000. 
+  - `INSTANCE_TYPE` and `DB_TYPE` point to a specific `magnolia.properties` configured as an author instance using postgres. 
+  - The author instance port is mapped to the port 3000 of the container.
+  - The author instance is linked to the database dbAuthor and can be accessed inside the container through the name `db`.
+  - The database credentials are injected inside the instance container through the three environment variables `DB_SCHEMA`, `DB_USERNAME`, `DB_PASSWORD`.
+- _public_: The Magnolia public instance listening on the port 3001. 
+  - `INSTANCE_TYPE` and `DB_TYPE` point to a specific `magnolia.properties` configured as an public instance using mysql. 
+  - The public instance port is mapped to the port 3001 of the container.
+  - The public instance is linked to the database dbPublic and can be accessed inside the container through the name `db`.
+    - The database credentials are injected inside the instance container through the three environment variables `DB_SCHEMA`, `DB_USERNAME`, `DB_PASSWORD`.
+
+The public instance is available at this address http://localhost:3001 and the author instance at this address http://localhost:3000. If you are using MacOS, don't forget to replace the localhost by the IP address of the boot2docker virtual machine.
+
+The last step is to configure the public instance as a [subscriber](http://documentation.magnolia-cms.com/display/DOCS/Subscribers).
+
+In an ideal world, at least two public instances are needed for redundancy and a load-balancer must be configured to dispatch the requests automatically. This will be treated in a next post!
+
+The source code of this post is available [here](https://github.com/nicolasbarbe/magnolia-docker-compose).
